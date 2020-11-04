@@ -36,10 +36,13 @@ class CustomController(BaseController):
         #T_long = (85824 + 0.4*(86720-85824))/1000 # time for long controller to reach 90% SS with step input
         Ku_long = 163500 # Lowest long gain causing rapid oscillation in speed under step input
         Tu_long = (0.096/2 + 0.032/2) # Period of that oscillation
-        Ku_lat = 0.61
-        Tu_lat = 5
+        Ku_lat = 0.60*0.61
+        Tu_lat = 6
         self.k_pid_longitudinal = np.asarray([0.60*Ku_long, 1.2*Ku_long/Tu_long, 3*Ku_long*Tu_long/40]).reshape((1,3)) #np.asarray([163500,0,0]).reshape((1,3))#np.asarray([1.2*T_long/L_long, 1.2*T_long/L_long/(2.0*L_long), 1.2*T_long/L_long*0.5*L_long]).reshape((1,3))#np.asarray([0.60*Ku, 1.2*Ku/Tu, 3*Ku*Tu/40]).reshape((1,3))
         self.k_pid_lateral = np.asarray([0.60*Ku_lat, 1.2*Ku_lat/Tu_lat, 3*Ku_lat*Tu_lat/40]).reshape((1,3))#np.asarray([500,0,0]).reshape((1,3))#np.asarray([1,0,0]).reshape((1,3))#
+        
+        self.look_ahead_multiple = 2.5 # How many car lengths to look ahead and average over when determining desired heading angle
+        self.look_ahead_indices = int(self.look_ahead_multiple * 24.0) # Corresponding number of indices (note: car length is approx. equiv. to path length over 24 points)
         
         ### Time of Last Zero Crossing for Each Signal (for determining Ziegler-Nichols Tu):
         self.last_zero_crossing = np.zeros((3,1))
@@ -91,9 +94,9 @@ class CustomController(BaseController):
         p2p_local = rotation_mat @ p2p_world
         
         ### Compute Pose to Path Heading Angle Error:
-        # Points that comes before and after nearest waypoint:
+        # Points that comes before and 2.5 car lengths later waypoint:
         nearest_waypoint_prev = trajectory[(nearest_waypoint_idx-1) % trajectory.shape[0]]
-        nearest_waypoint_fwd = trajectory[(nearest_waypoint_idx+10) % trajectory.shape[0]]
+        nearest_waypoint_fwd = trajectory[(nearest_waypoint_idx+self.look_ahead_indices) % trajectory.shape[0]] # look roughly 2.5 car lengths ahead
         # Desired Trajectory Position Delta around Current Waypoint:
         nearest_waypoint_delta = nearest_waypoint_fwd - nearest_waypoint_prev
         # Compute Desired Heading:
