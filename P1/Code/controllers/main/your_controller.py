@@ -225,6 +225,7 @@ class CustomController(BaseController):
         # ---------------|Longitudinal Controller|-------------------------
         F = np.linalg.norm([clamp(Cx,0,15737), Cy]); # Allow crosstrack and alongtrack errors to drive the throttle
         # Note: This approach is effectively equivalent to having one longitudinal pid controller which controls norm[ey/kt, eth/V/kt**2] but is just a cleaner representation
+        # Todo: Slow down based on Cth? (slower when steering high to increase control authority)
 
         # Return all states and calculated control inputs (F, delta)
         return X, Y, xdot, ydot, psi, psidot, F, delta
