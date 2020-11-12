@@ -49,8 +49,8 @@ class CustomController(BaseController):
         ####
         # Settings:
         ####
-        self.target_time = 60 # [s] Target time to complete loop
-        self.max_cornering_speed = 8.5  # [m/s] Maximum Cornering Speed (empirical)
+        self.target_time = 40 # [s] Target time to complete loop
+        self.max_cornering_speed = 12.5  # [m/s] Maximum Cornering Speed (empirical)
         self.max_cornering_speed = min(self.max_cornering_speed, self.track_length/self.target_time)
         vcm = self.max_cornering_speed # short hand
         
@@ -62,14 +62,14 @@ class CustomController(BaseController):
             (1700,vcm),
             (2453,vcm/2.0),
             (3236,2*vcm),
-            (5217,vcm),
-            (5835,vcm),
+            #(5217,vcm),
+            (5835,vcm/2.0),
             #(6574,2*vcm),
             (7799,vcm/2.0),
-            (8203,vcm)
+            (8203,vcm/4.0)
         ]
         
-        self.desired_poles = np.asarray([-2.5, -5.3, -0.5+0.5j, -0.5-0.5j])
+        self.desired_poles = np.asarray([-2.5, -5.3, -0.5+1j, -0.5-1j])
         
         ####
         # Setup:
