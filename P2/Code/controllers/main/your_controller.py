@@ -49,24 +49,24 @@ class CustomController(BaseController):
         ####
         # Settings:
         ####
-        self.target_time = 70 # [s] Target time to complete loop
-        self.max_cornering_speed = 4  # [m/s] Maximum Cornering Speed (empirical)
+        self.target_time = 60 # [s] Target time to complete loop
+        self.max_cornering_speed = 8.5  # [m/s] Maximum Cornering Speed (empirical)
         self.max_cornering_speed = min(self.max_cornering_speed, self.track_length/self.target_time)
         vcm = self.max_cornering_speed # short hand
         
-        self.vmax = 60 # [m/s] Maximum allowable instantaneous speed (before system becomes unstable)
+        self.vmax = 50 # [m/s] Maximum allowable instantaneous speed (before system becomes unstable)
         
         # Velocity Waypoints (what speed should the car be going at key points along the track):
         self.vel_waypoints = [
             (0,0),
             (1700,vcm),
-            (2453,vcm),
+            (2453,vcm/2.0),
             (3236,2*vcm),
-            (5217,2*vcm),
+            (5217,vcm),
             (5835,vcm),
             #(6574,2*vcm),
-            (7799,vcm),
-            (8203,vcm/2.0)
+            (7799,vcm/2.0),
+            (8203,vcm)
         ]
         
         self.desired_poles = np.asarray([-2.5, -5.3, -0.5+0.5j, -0.5-0.5j])
