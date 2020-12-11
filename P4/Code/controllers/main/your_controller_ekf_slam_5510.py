@@ -1,4 +1,4 @@
-# Fill in the respective functions to implement the controller
+# Fill in the respective function to implement the LQR/EKF SLAM controller
 
 # Import libraries
 import numpy as np
@@ -7,6 +7,13 @@ from scipy import signal, linalg
 from util import *
 from warnings import warn
 from scipy.ndimage import gaussian_filter1d
+
+import numpy as np
+from base_controller import BaseController
+from scipy import signal, linalg
+from scipy.spatial.transform import Rotation
+from util import *
+from ekf_slam import EKF_SLAM
 
 # CustomController class (inherits from BaseController)
 class CustomController(BaseController):
@@ -37,8 +44,8 @@ class CustomController(BaseController):
         self.F_max = 15737 # [N] Maximum vehicle thrust
         self.delta_max = np.pi/6 # [rad] Maximum steering angle (symmetric about 0)
         
-        self.decel_max = 1.1 # [m/s/s] Maximum capable longitudinal deceleration rate under any condition (empirical from coasting down)
-        self.accel_max = self.F_max / self.m # [m/s/s] Maximum vehicle acceleration
+        self.decel_max = 9.08 # no brakes: 1.1 # [m/s/s] Maximum capable longitudinal deceleration rate under any condition (empirical from coasting down)
+        self.accel_max = 1.01*self.F_max / self.m # [m/s/s] Maximum vehicle acceleration
         
         ####
         # Track Configuration Constants:
@@ -49,23 +56,29 @@ class CustomController(BaseController):
         # Settings:
         ####
         self.target_time = 40 # [s] Target time to complete loop
-        self.max_cornering_speed = 16.5  # [m/s] Maximum Cornering Speed (empirical)
+        self.max_cornering_speed = 21.5  # [m/s] Maximum Cornering Speed (empirical)
         self.max_cornering_speed = min(self.max_cornering_speed, self.track_length/self.target_time)
         vcm = self.max_cornering_speed # short hand
         
-        self.vmax = 75 # [m/s] Maximum allowable instantaneous speed (before system becomes unstable)
+        self.vmax = 90 # [m/s] Maximum allowable instantaneous speed (before system becomes unstable)
         
         # Velocity Waypoints (what speed should the car be going at key points along the track):
         self.vel_waypoints = [
             (0,0),
-            (1700,vcm/1.38),
-            (2453,vcm/2.0/1.38),
+            (2100,vcm/1.49),#(1700,vcm/1.38),
+            (2200,vcm/1.49/1.5),#(1700,vcm/1.38),
+            #(2250,vcm),#(1700,vcm/1.38),
+            #(2300,vcm/1.5),#(1700,vcm/1.38),
+            #(2453,vcm/2.0/1.5),
             #(3236,2*vcm), # <-
             #(5217,vcm),
-            (5835,vcm/1.1),
+            (5705,vcm/1.0), #5715, 5685
             #(6574,2*vcm),
-            (7799,vcm/1.42),
-            (8203,1000) # Floor it at the end
+            #(7650,vcm/1.1),
+            #(7799,vcm/1.42),
+            (7800,vcm/1.5),
+            (7885,vcm/1.5),
+            (8203,self.vmax) # Floor it at the end
         ]
         
         #self.desired_poles = np.asarray([-2.5, -5.3, -0.5+1j, -0.5-1j])
@@ -77,12 +90,21 @@ class CustomController(BaseController):
         ####
         # Setup:
         ####
+        self.counter = 0
         self.time = 0 # [s] Current time into trajectory execution
+        np.random.seed(99)
         
         # Precompute Curvature Vector:
         self.curve = self.computeCurvature()
         
         # Velocity Trajectory (at each position point along the track, what's the target vehicle speed). Used to set xdot depending on track conditions.
+        self.vel_traj, time_traj, dist_traj, tf, traj_info = self.s_traj_waypoints(
+            pos_traj = self.trajectory,
+            a = self.accel_max, 
+            d = self.decel_max,
+            vel_waypoints = self.vel_waypoints
+        )
+        """
         self.vel_traj, time_traj, v_ratio = self.fastest_trap_vel_traj(
             pos_traj = self.trajectory,
             vavg = self.track_length / self.target_time,
@@ -91,23 +113,38 @@ class CustomController(BaseController):
             vel_waypoints = self.vel_waypoints
         )
         print(r"Requested Avg. Velocity is {}% of max speed for given profile waypoints.".format(int(100*v_ratio)))
+        """
+        print(r"Target Time: {}s, Expected Completion Time {}s".format(self.target_time, tf))
         
-        if False:
-            # Plot Velocity Trajectory:
+        if True:
+            # Plot Distance- and Time-Parameterized Velocity Trajectory:
             import matplotlib.pyplot as plt
             plt.figure()
-            plt.plot(np.arange(0,self.vel_traj.shape[0]), self.vel_traj)
-            plt.title('Velocity Trajectory Points')
+            plt.plot(dist_traj,self.vel_traj)
+            for t0,s0,v0, tp,sp,vp, tf,sf,vf in traj_info: 
+                plt.axvline(s0, linestyle="--", color='blue')
+                plt.axvline(sp, linestyle=":", color='black')
+                plt.axvline(sf, linestyle="--", color='red')
+                
+                plt.axhline(v0, linestyle="--", color='blue')
+                plt.axhline(vf, linestyle="--", color='red')
+                plt.axhline(vp, linestyle=":", color='black')
+            plt.xlabel('s')
+            plt.ylabel('v(s)')
             plt.show()
             
             plt.figure()
-            plt.plot(np.arange(0,time_traj.shape[0]), time_traj)
-            plt.title('Time Trajectory Points')
-            plt.show()
-            
-            plt.figure()
-            plt.plot(time_traj, self.vel_traj)
-            plt.title('Velocity Trajectory')
+            plt.plot(time_traj,self.vel_traj)
+            for t0,s0,v0, tp,sp,vp, tf,sf,vf in traj_info: 
+                plt.axvline(t0, linestyle="--", color='blue')
+                plt.axvline(tp, linestyle=":", color='black')
+                plt.axvline(tf, linestyle="--", color='red')
+                
+                plt.axhline(v0, linestyle="--", color='blue')
+                plt.axhline(vf, linestyle="--", color='red')
+                plt.axhline(vp, linestyle=":", color='black')
+            plt.xlabel('t')
+            plt.ylabel('v(t)')
             plt.show()
         
         self.e1_last = 0
@@ -128,7 +165,7 @@ class CustomController(BaseController):
         self.k_pid_longitudinal = np.asarray([0.60*Ku_long, 1.2*Ku_long/Tu_long, 3*Ku_long*Tu_long/40]).reshape((1,3)) #np.asarray([163500,0,0]).reshape((1,3))#np.asarray([1.2*T_long/L_long, 1.2*T_long/L_long/(2.0*L_long), 1.2*T_long/L_long*0.5*L_long]).reshape((1,3))#np.asarray([0.60*Ku, 1.2*Ku/Tu, 3*Ku*Tu/40]).reshape((1,3))
         self.k_pid_lateral = np.asarray([0.60*Ku_lat, 1.2*Ku_lat/Tu_lat, 3*Ku_lat*Tu_lat/40]).reshape((1,3))#np.asarray([500,0,0]).reshape((1,3))#np.asarray([1,0,0]).reshape((1,3))#
         
-        self.look_ahead_multiple = 8.7 # How many car lengths to look ahead and average over when determining desired heading angle
+        self.look_ahead_multiple = 17.7 # How many car lengths to look ahead and average over when determining desired heading angle
         self.look_ahead_indices = int(self.look_ahead_multiple * 24.0) # Corresponding number of indices (note: car length is approx. equiv. to path length over 24 points)
         
         ### Time of Last Zero Crossing for Each Signal (for determining Ziegler-Nichols Tu):
@@ -147,8 +184,161 @@ class CustomController(BaseController):
         self.decel_rate = 0
         self.xdot_last = 0
 
+        # For determining max decel rate:
+        self.applied_brakes_time = 0
+        self.applied_brakes_speed = float('inf')
+
         # Print Key Settings:
         print((self.max_cornering_speed, self.look_ahead_multiple, self.Q0, self.R0, self.vel_waypoints))
+
+    def getStates(self, timestep, use_slam=False):
+
+        delT, X, Y, xdot, ydot, psi, psidot = super().getStates(timestep)
+
+        # Initialize the EKF SLAM estimation
+        if self.counter == 0:
+            # Load the map
+            minX, maxX, minY, maxY = -120., 450., -350., 50.
+            #minX, maxX, minY, maxY = -120., 450., -500., 50.
+            map_x = np.linspace(minX, maxX, 7)
+            map_y = np.linspace(minY, maxY, 7)
+            map_X, map_Y = np.meshgrid(map_x, map_y)
+            map_X = map_X.reshape(-1,1)
+            map_Y = map_Y.reshape(-1,1)
+            self.map = np.hstack((map_X, map_Y)).reshape((-1))
+            
+            # Parameters for EKF SLAM
+            self.n = int(len(self.map)/2)             
+            X_est = X + 0.5
+            Y_est = Y - 0.5
+            psi_est = psi - 0.02
+            mu_est = np.zeros(3+2*self.n)
+            mu_est[0:3] = np.array([X_est, Y_est, psi_est])
+            mu_est[3:] = np.array(self.map)
+            init_P = 1*np.eye(3+2*self.n)
+            W = np.zeros((3+2*self.n, 3+2*self.n))
+            W[0:3, 0:3] = delT**2 * 0.1 * np.eye(3)
+            V = 0.1*np.eye(2*self.n)
+            V[self.n:, self.n:] = 0.01*np.eye(self.n)
+            # V[self.n:] = 0.01
+            print(V)
+            
+            # Create a SLAM
+            self.slam = EKF_SLAM(mu_est, init_P, delT, W, V, self.n)
+            self.counter += 1
+        else:
+            mu = np.zeros(3+2*self.n)
+            mu[0:3] = np.array([X, 
+                                Y, 
+                                psi])
+            mu[3:] = self.map
+            y = self._compute_measurements(X, Y, psi)
+            mu_est, _ = self.slam.predict_and_correct(y, self.previous_u)
+
+        self.previous_u = np.array([xdot, ydot, psidot])
+
+        print("True      X, Y, psi:", X, Y, psi)
+        print("Estimated X, Y, psi:", mu_est[0], mu_est[1], mu_est[2])
+        print("-------------------------------------------------------")
+        
+        if use_slam == True:
+            return delT, mu_est[0], mu_est[1], xdot, ydot, mu_est[2], psidot
+        else:
+            return delT, X, Y, xdot, ydot, psi, psidot
+
+    def s_traj(self, t0,s0,v0,sf,vf,a,d):
+        """
+        Computes the parameters for an s-parameterized pyramid trajectory which 
+        starts at (t0,s0,v0) and ends at (sf,vf) while accelerating at a and 
+        decelerating at d. If a speed is unreachable, this trajectory hits the 
+        closest possible speed.
+        """
+        sf = sf - s0 # zero
+        tp = ( np.sqrt( (d*v0**2 + a*vf**2 + 2*a*d*sf) / (a+d) ) - v0) / a
+        vp = v0 + a*tp
+        sp = 0.5 * (v0+vp)*tp
+        tf = 2*(sf-sp)/(vp+vf) + tp
+        
+        sp = sp + s0 # reoffset
+        tp = tp + t0 # offset
+        tf = tf + t0 # offset
+        
+        return tp, tf, vp, sp
+    
+    def s_traj_follow(self, s, a,d, t0,s0,v0, tp,sp,vp):
+        """
+        For an s-parameterized pyramid trajectory with the given parameters 
+        produced by s_traj, this returns the target time and velocity at position 
+        s.
+        """
+        if s <= sp:
+            Dt = (np.sqrt(v0**2 + 2*a*(s-s0)) - v0) / a
+            t = t0 + Dt
+            v = v0 + a*Dt
+        else:
+            Dt = (vp - np.sqrt(vp**2 - 2*d*(s-sp))) / d
+            t = tp + Dt
+            v = vp - d*Dt
+            
+        return v,t
+    
+    def s_traj_waypoints(self, pos_traj, a, d, vel_waypoints):
+        if vel_waypoints[0][0] != 0:
+            vel_waypoints = [(0,0)] + vel_waypoints
+        
+        if vel_waypoints[-1][0] != pos_traj.shape[0]:
+            vel_waypoints = vel_waypoints + [(pos_traj.shape[0],0)]
+        
+        traj_info = []
+        t0 = 0
+        s0 = 0
+        for w in range(1,len(vel_waypoints)):
+            i_prev, v_prev = vel_waypoints[w-1]
+            i, vi = vel_waypoints[w]
+            
+            # Path length of section:
+            Ds = self.path_length(pos_traj, i_prev, i)
+            sf = s0 + Ds
+            
+            # Compute Trajectory Parameters:
+            tp, tf, vp, sp = self.s_traj(t0,s0,v_prev, sf,vi, a,d)
+            
+            # Append info defining the sub trapezoidal trajectory:
+            traj_info.append((t0,s0,v_prev, tp,sp,vp, tf,sf,vi))
+            
+            # Update s0,t0
+            s0 = sf
+            t0 = tf
+            
+        
+        #print(vel_waypoints)
+        #print(traj_info)
+        
+        
+        dist_traj = np.zeros((pos_traj.shape[0],1))
+        time_traj = np.zeros((pos_traj.shape[0],1))
+        vel_traj = np.zeros((pos_traj.shape[0],1))
+        vel_traj[0] = vel_waypoints[0][1]
+        
+        t = 0 # trajectory info index
+        s = 0 # total distance into trajectory of current waypoint
+        (t0,s0,v_prev, tp,sp,vp, tf,sf,vi) = traj_info[t] # parameters of current trapezoid
+        for i in range(1,pos_traj.shape[0]):
+            s = s + np.sqrt(np.sum((pos_traj[i] - pos_traj[i-1])**2))
+            
+            # If s is outside of pyramid, advance pyramid index t until it's inside
+            while s > sf:
+                t = t+1
+                (t0,s0,v_prev, tp,sp,vp, tf,sf,vi) = traj_info[t]
+            
+            assert(s0 <= s <= sf)
+            #assert(sm <= se)
+            
+            vel_traj[i], time_traj[i] = self.s_traj_follow(s, a,d, t0,s0,v_prev, tp,sp,vp)
+            dist_traj[i] = s
+            
+        #print(vel_traj)
+        return vel_traj, time_traj, dist_traj, tf, traj_info
 
     def fastest_trap_vel_traj(self, pos_traj, vavg, amax, dmax, vel_waypoints):
         """
@@ -356,8 +546,26 @@ class CustomController(BaseController):
         eigVals, eigVecs = linalg.eig(A-B@K)
         return K, S, eigVals
 
-    def update(self, timestep):
+    def _compute_measurements(self, X, Y, psi):
+        x = np.zeros(3+2*self.n)
+        x[0:3] = np.array([X, Y, psi])
+        x[3:] = self.map
         
+        p = x[0:2]
+        psi = x[2]
+        m = x[3:].reshape((-1,2))
+
+        y = np.zeros(2*self.n)
+
+        for i in range(self.n):
+            y[i] = np.linalg.norm(m[i, :] - p)
+            y[self.n+i] = wrapToPi(np.arctan2(m[i,1]-p[1], m[i,0]-p[0]) - psi)
+            
+        y = y + np.random.multivariate_normal(np.zeros(2*self.n), self.slam.V)
+        # print(np.random.multivariate_normal(np.zeros(2*self.n), self.slam.V))
+        return y
+
+    def update(self, timestep, driver):
         trajectory = self.trajectory
 
         lr = self.lr
@@ -367,8 +575,8 @@ class CustomController(BaseController):
         m = self.m
         g = self.g
 
-        # Fetch the states from the BaseController method
-        delT, X, Y, xdot, ydot, psi, psidot = super().getStates(timestep)
+        # Fetch the states from the newly defined getStates method
+        delT, X, Y, xdot, ydot, psi, psidot = self.getStates(timestep, use_slam=False)
 
         self.time += delT # update total time into trajectory execution
     
@@ -391,6 +599,33 @@ class CustomController(BaseController):
         p2p_world = nearest_waypoint - np.asarray([X,Y])
         # Compute pose to path (waypoint) vector in local (vehicle) frame:   
         p2p_local = rotation_mat @ p2p_world
+        
+        ### Primitive "Path-Aware" Lookahead:
+        prev_idx = 0
+        if nearest_waypoint_idx > 1700:
+            prev_idx, prev_lam = 1700, 17.7
+            targ_idx, targ_lam = 2100, 17.7
+        if nearest_waypoint_idx > 2100:
+            prev_idx, prev_lam = 2100, 17.7
+            targ_idx, targ_lam = 2200, 17.7
+        if nearest_waypoint_idx > 2200:
+            prev_idx, prev_lam = 2200, 17.7
+            targ_idx, targ_lam = 3000, 17.7
+        if nearest_waypoint_idx > 3000:
+            prev_idx, prev_lam = 3000, 17.7
+            targ_idx, targ_lam = 5000, (48-17.7)/3000 * 2000 + 17.7
+        if nearest_waypoint_idx > 5000:
+            prev_idx, prev_lam = 5000, (48-17.7)/3000 * 2000 + 17.7
+            targ_idx, targ_lam = 6000, 70
+        if nearest_waypoint_idx > 6000:
+            prev_idx, prev_lam = 6000, 42
+            targ_idx, targ_lam = 7800, 12
+        if nearest_waypoint_idx > 7800:
+            prev_idx, prev_lam = 7800, 8
+            targ_idx, targ_lam = 8203, 0
+        if prev_idx > 0:
+            self.look_ahead_multiple = (targ_lam-prev_lam) / (targ_idx-prev_idx) * (nearest_waypoint_idx-prev_idx) + prev_lam
+            self.look_ahead_indices = int(self.look_ahead_multiple * 24.0) # Corresponding number of indices (note: car length is approx. equiv. to path length over 24 points)
         
         ### Compute Pose to Path Heading Angle Error:
         # Points that comes before and 2.5 car lengths later waypoint:
@@ -582,13 +817,21 @@ class CustomController(BaseController):
         deltaFF = L*kappa + Kv * ay + k3 * e2_ss
         
         # Implement Feedforward + Fullstate Feedback Control:
-        delta = deltaFF - K@X_lat
+        delta = -K@X_lat
+        # delta = deltaFF - K@X_lat # use feedforward
         delta = delta[0,0] # convert from 1x1 array to scalar
         delta = clamp(delta, -self.delta_max, self.delta_max)
 
         # ---------------|Longitudinal Controller|-------------------------
-        F = np.abs(np.linalg.norm([clamp(Cx,0,self.F_max), Cy])) # Allow crosstrack and alongtrack errors to drive the throttle
-        F = clamp(F,0,self.F_max) - np.abs(delta) * 0.1 * self.F_max / self.delta_max # don't accelerate as much if you're actively turning the wheel
+        F = np.sign(Cx) * np.abs(np.linalg.norm([clamp(Cx,0,self.F_max), Cy])) # Allow crosstrack and alongtrack errors to drive the throttle
+        F = F - np.abs(delta) * 0.05 * self.F_max / self.delta_max # don't accelerate as much if you're actively turning the wheel
+        F_w_steering_correction = F - np.abs(delta) * 0.5 * self.decel_max*m / self.delta_max # brake if you're actively turning the wheel a lot
+        print((F,F_w_steering_correction,-F_w_steering_correction/m/self.decel_max))
+        if F_w_steering_correction < 0:
+            driver.setBrakeIntensity(clamp(-12.0*F_w_steering_correction/m/self.decel_max, 0, 1))
+            F = 0
+        else:
+            driver.setBrakeIntensity(0) # stop braking
         F = clamp(F,0,self.F_max) # Ensure appropriate bounds (main will otherwise treat negative F as positive)
         # Note: This approach is effectively equivalent to having one longitudinal pid controller which controls norm[ey/kt, eth/V/kt**2] but is just a cleaner representation
         # Todo: Slow down based on Cth? (slower when steering high to increase control authority)
@@ -596,6 +839,34 @@ class CustomController(BaseController):
         #print((int(100*delta*6/np.pi), int(100*F/15737)) )
 
         #print((int(100*delta/self.delta_max),int(100*F/self.F_max)))
+
+        # Return all states and calculated control inputs (F, delta)
+        # Setting brake intensity is enabled by passing
+        # the driver object, which is used to provide inputs
+        # to the car, to our update function
+        # Using this function is purely optional.
+        # An input of 0 is no brakes applied, while
+        # an input of 1 is max brakes applied
+        
+        # Determine max decel rate:
+        run_braking_test = False
+        if run_braking_test and nearest_waypoint_idx > 400 and F < 0.1 and self.applied_brakes_time == 0:
+            # If running test and well into straight away and have already peeked speed and haven't applied brakes yet
+            self.applied_brakes_time = self.time
+            self.applied_brakes_speed = xdot
+            driver.setBrakeIntensity(1)
+        
+        if run_braking_test and self.applied_brakes_time > 0 and xdot < self.max_cornering_speed:
+            F = 0
+            driver.setBrakeIntensity(1)
+            if xdot < 1:
+                Dt = self.time - self.applied_brakes_time
+                Dv = xdot - self.applied_brakes_speed
+                decel = -Dv/Dt
+                print("Max Decel Rate: {}".format(decel))
+                raise Exception("Max Decel Rate determined. Killing sim.")
+
+        #driver.setBrakeIntensity(clamp(-F/m/self.decel_max, 0, 1))
 
         # Return all states and calculated control inputs (F, delta)
         return X, Y, xdot, ydot, psi, psidot, F, delta
